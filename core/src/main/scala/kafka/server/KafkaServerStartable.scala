@@ -41,6 +41,7 @@ class KafkaServerStartable(val staticServerConfig: KafkaConfig, reporters: Seq[K
   def this(serverConfig: KafkaConfig) = this(serverConfig, Seq.empty)
 
   def startup(): Unit = {
+    //kafka的broker实际上就是一个server对象
     try server.startup()
     catch {
       case _: Throwable =>
