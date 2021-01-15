@@ -217,6 +217,26 @@ class KafkaServer(val config: KafkaConfig, time: Time = Time.SYSTEM, threadNameP
    *
    * 启动Kafka服务器的单个实例。
    * 实例化LogManager，SocketServer和KafkaRequestHandlers，
+   *
+   * ·始化zk的连接 {@link initZkClient}
+   * ·监听zk变化 {@link FinalizedFeatureChangeListener.initOrThrow} todo 未完
+   * ·获取cluster_id {@link getOrGenerateClusterId}
+   * ·加载metadata信息
+   * ·初始化brokerId
+   * ·启动一个线程池执行一些后台定时任务
+   * ·创建metrics
+   * ·启动日志管理
+   * ·创建元数据缓存MetadataCache
+   * ·启动socketServer，监听端口
+   * ·启动副本管理
+   * ·启动token管理器
+   * ·启动kafka控制器
+   * ·启动GroupCoordinator
+   * ·启动事务机制TransactionCoordinator
+   * ·启动认证与授权机制
+   * ·创建“处理数据类请求”相关类dataPlaneRequestProcessor
+   * ·开启动态配置监听
+   * ·socketserver开始处理请求
    */
   def startup(): Unit = {
     try {
@@ -241,9 +261,10 @@ class KafkaServer(val config: KafkaConfig, time: Time = Time.SYSTEM, threadNameP
         initZkClient(time)
 
         /* initialize features */
-        //监听zk变化
+        //监听zk变化（2.7版本加的新功能）
         _featureChangeListener = new FinalizedFeatureChangeListener(featureCache, _zkClient)
         if (config.isFeatureVersioningSupported) {
+          // 只有大于等于2.7的版本才会开启此功能
           _featureChangeListener.initOrThrow(config.zkConnectionTimeoutMs)
         }
 
@@ -281,7 +302,7 @@ class KafkaServer(val config: KafkaConfig, time: Time = Time.SYSTEM, threadNameP
         kafkaScheduler.startup()
 
         /* create and configure metrics */
-        //创建server的监控指标
+        //创建server的metrics监控
         kafkaYammerMetrics = KafkaYammerMetrics.INSTANCE
         kafkaYammerMetrics.configure(config.originals)
 
@@ -382,7 +403,7 @@ class KafkaServer(val config: KafkaConfig, time: Time = Time.SYSTEM, threadNameP
             KafkaServer.MIN_INCREMENTAL_FETCH_SESSION_EVICTION_MS))
 
         /* start processing requests */
-        // 创建“处理数据类请求”相关类
+        // 创建“处理数据类请求”相关类dataPlaneRequestProcessor
         dataPlaneRequestProcessor = new KafkaApis(socketServer.dataPlaneRequestChannel, replicaManager, adminManager, groupCoordinator, transactionCoordinator,
           kafkaController, zkClient, config.brokerId, config, metadataCache, metrics, authorizer, quotaManagers,
           fetchManager, brokerTopicStats, clusterId, time, tokenManager, brokerFeatures, featureCache)
@@ -466,20 +487,37 @@ class KafkaServer(val config: KafkaConfig, time: Time = Time.SYSTEM, threadNameP
       brokerTopicStats, metadataCache, logDirFailureChannel, alterIsrManager)
   }
 
+  /**
+   * 该方法初始化并创建了KafkaZkClient对象
+   *
+   * points：
+   * 1、可以指定zk的存储根目录，且不存在的话会提前创建
+   * 2、可以设置zk的acl权限控制
+   * 3、创建KafkaZkClient对象 {@link KafkaZkClient.apply}，而kafkaZkClient对象内部包含一个ZooKeeperClient对象
+   * @param time
+   */
   private def initZkClient(time: Time): Unit = {
     info(s"Connecting to zookeeper on ${config.zkConnect}")
 
+    //创建KafkaZkClient对象
     def createZkClient(zkConnect: String, isSecure: Boolean) = {
       KafkaZkClient(zkConnect, isSecure, config.zkSessionTimeoutMs, config.zkConnectionTimeoutMs,
         config.zkMaxInFlightRequests, time, name = Some("Kafka server"), zkClientConfig = Some(zkClientConfig))
     }
 
-    val chrootIndex = config.zkConnect.indexOf("/")
+
+    /**
+     * kafka默认使用zk的根目录/，
+     * 但可以在配置文件的zookeeper.connect字段结尾增加/路径
+     * 而此处所做的就是判断配置文件中有没有重新指定根目录
+     */
+    val chrootIndex = config.zkConnect.indexOf("/") //返回配置文件zookeeper.connect字段中"/"符号第一次出现的位置
     val chrootOption = {
       if (chrootIndex > 0) Some(config.zkConnect.substring(chrootIndex))
       else None
     }
 
+    // 是否设置zk的acl权限控制
     val secureAclsEnabled = config.zkEnableSecureAcls
     val isZkSecurityEnabled = JaasUtils.isZkSaslEnabled() || KafkaConfig.zkTlsClientAuthEnabled(zkClientConfig)
 
@@ -488,6 +526,7 @@ class KafkaServer(val config: KafkaConfig, time: Time = Time.SYSTEM, threadNameP
         s"verification of the JAAS login file failed ${JaasUtils.zkSecuritySysConfigString}")
 
     // make sure chroot path exists
+    // 如果设置了指定根目录，则此步骤中进行创建
     chrootOption.foreach { chroot =>
       val zkConnForChrootCreation = config.zkConnect.substring(0, chrootIndex)
       val zkClient = createZkClient(zkConnForChrootCreation, secureAclsEnabled)
@@ -496,11 +535,16 @@ class KafkaServer(val config: KafkaConfig, time: Time = Time.SYSTEM, threadNameP
       zkClient.close()
     }
 
+    // 创建KafkaZkClient对象
     _zkClient = createZkClient(config.zkConnect, secureAclsEnabled)
+    // 在zk中预先创建顶级路径
     _zkClient.createTopLevelPaths()
   }
 
   private def getOrGenerateClusterId(zkClient: KafkaZkClient): String = {
+    /**
+     * 尝试通过zkclient从zk中获取，如果没有值，则通过zkclient创建
+     */
     zkClient.getClusterId.getOrElse(zkClient.createOrGetClusterId(CoreUtils.generateUuidAsBase64()))
   }
 
