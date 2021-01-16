@@ -220,8 +220,8 @@ class KafkaServer(val config: KafkaConfig, time: Time = Time.SYSTEM, threadNameP
    *
    * ·始化zk的连接 {@link initZkClient}
    * ·监听zk变化 {@link FinalizedFeatureChangeListener.initOrThrow} todo 未完
-   * ·获取cluster_id {@link getOrGenerateClusterId}
-   * ·加载metadata信息
+   * ·获取cluster_id {@link getOrGenerateClusterId} todo 未完
+   * ·加载metadata信息 {@link getBrokerMetadataAndOfflineDirs}
    * ·初始化brokerId
    * ·启动一个线程池执行一些后台定时任务
    * ·创建metrics
@@ -856,8 +856,10 @@ class KafkaServer(val config: KafkaConfig, time: Time = Time.SYSTEM, threadNameP
     val brokerMetadataSet = mutable.HashSet[BrokerMetadata]()
     val offlineDirs = mutable.ArrayBuffer.empty[String]
 
+    // 按照“,”拆分日志配置路径log.dirs
     for (logDir <- config.logDirs) {
       try {
+        // 在每一个配置目录下创建meta.properties文件
         val brokerMetadataOpt = brokerMetadataCheckpoints(logDir).read()
         brokerMetadataOpt.foreach { brokerMetadata =>
           brokerMetadataMap += (logDir -> brokerMetadata)
