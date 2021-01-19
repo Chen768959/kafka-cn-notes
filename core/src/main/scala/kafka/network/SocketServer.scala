@@ -139,17 +139,39 @@ class SocketServer(val config: KafkaConfig,
    * when processors start up and invoke [[org.apache.kafka.common.network.Selector#poll]].
    *
    * @param startProcessingRequests Flag indicating whether `Processor`s must be started.
+   *
+   * 如果startProcessingRequests传参为true，则在此方法中就启动acceptors和processors
+   * 否则等到kafka启动方法的最后调用socketServer.startProcessingRequests(authorizerFutures)时再启动。
+   * kafka初始化时该参数为false
    */
   def startup(startProcessingRequests: Boolean = true): Unit = {
     this.synchronized {
+
+      // 对连接数进行计数，每个监听都有最大连接数的限制
       connectionQuotas = new ConnectionQuotas(config, time, metrics)
+
+      /**
+       * controlPlaneListener 代表了处理controlPlane数据的监听器
+       * 监听器格式为“监听器名称://主机名：端口”，如PLAINTEXT://kafka-host:9092，
+       * 监听器名称可自定义。
+       *
+       * 此方法为每个监听器创建了对应的Acceptor和Processor对象，
+       * 由此可见监听器与Acceptor和Processor相对应。
+       * 且Acceptor和Processor实现了Runnable接口
+       */
       createControlPlaneAcceptorAndProcessor(config.controlPlaneListener)
+      /**
+       * 为每个DataPlane监听创建对应的Acceptor和Processor对象（Processor为复数，由num.network.threads决定），
+       */
       createDataPlaneAcceptorsAndProcessors(config.numNetworkThreads, config.dataPlaneListeners)
+
+      //kafka启动时此参数为false，所以此处不进行acceptors和processors的启动
       if (startProcessingRequests) {
         this.startProcessingRequests()
       }
     }
 
+    // 以下都是监控指标的创建
     newGauge(s"${DataPlaneMetricPrefix}NetworkProcessorAvgIdlePercent", () => SocketServer.this.synchronized {
       val ioWaitRatioMetricNames = dataPlaneProcessors.values.asScala.iterator.map { p =>
         metrics.metricName("io-wait-ratio", MetricsGroup, p.metricTags)
@@ -271,25 +293,43 @@ class SocketServer(val config: KafkaConfig,
   private def createDataPlaneAcceptorsAndProcessors(dataProcessorsPerListener: Int,
                                                     endpoints: Seq[EndPoint]): Unit = {
     endpoints.foreach { endpoint =>
+      // 将监听器纳入连接计数对象的监管
       connectionQuotas.addListener(config, endpoint.listenerName)
+      // 为监听器创建dataPlane的Acceptor对象
       val dataPlaneAcceptor = createAcceptor(endpoint, DataPlaneMetricPrefix)
+      // 为监听器创建“多个”Processors对象，其数目由num.network.threads参数（dataProcessorsPerListener）决定，
+      // 将Processor对象装入Acceptor对象中
       addDataPlaneProcessors(dataPlaneAcceptor, endpoint, dataProcessorsPerListener)
+      //dataPlaneAcceptors是map结构，其中存储了监听与dataPlaneAcceptor的对应关系
       dataPlaneAcceptors.put(endpoint, dataPlaneAcceptor)
       info(s"Created data-plane acceptor and processors for endpoint : ${endpoint.listenerName}")
     }
   }
 
+  /**
+   * 根据配置遍历所有监听器，
+   * 为每个监听器创建Acceptor对象和Processor对象
+   * 并且配置Acceptor和Processor之间的关系
+   * @param endpointOpt
+   */
   private def createControlPlaneAcceptorAndProcessor(endpointOpt: Option[EndPoint]): Unit = {
+    // control.plane.listener.name参数指定了Control plane的监听器，此处遍历配置参数
+    // endpoint为listener监听器，此处遍历所有ControlPlane监听器
     endpointOpt.foreach { endpoint =>
+      //connectionQuotas的作用是对连接数进行计数，此处也是将此监听纳入监管
       connectionQuotas.addListener(config, endpoint.listenerName)
+      // 为监听器创建对应Acceptor对象（继承了Runnable接口）
       val controlPlaneAcceptor = createAcceptor(endpoint, ControlPlaneMetricPrefix)
+      // 为监听器创建对应Processor对象（继承了Runnable接口）
       val controlPlaneProcessor = newProcessor(nextProcessorId, controlPlaneRequestChannelOpt.get, connectionQuotas, endpoint.listenerName, endpoint.securityProtocol, memoryPool)
       controlPlaneAcceptorOpt = Some(controlPlaneAcceptor)
       controlPlaneProcessorOpt = Some(controlPlaneProcessor)
       val listenerProcessors = new ArrayBuffer[Processor]()
       listenerProcessors += controlPlaneProcessor
+      // 将Processor对象添加到RequestChannel中
       controlPlaneRequestChannelOpt.foreach(_.addProcessor(controlPlaneProcessor))
       nextProcessorId += 1
+      //将Processor对象添加到Acceptor对象中
       controlPlaneAcceptor.addProcessors(listenerProcessors, ControlPlaneThreadPrefix)
       info(s"Created control-plane acceptor and processor for endpoint : ${endpoint.listenerName}")
     }
