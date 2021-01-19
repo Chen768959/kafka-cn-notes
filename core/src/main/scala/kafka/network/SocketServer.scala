@@ -74,6 +74,27 @@ import scala.util.control.ControlThrowable
  *      1 Acceptor thread that handles new connections
  *      Acceptor has 1 Processor thread that has its own selector and read requests from the socket.
  *      1 Handler thread that handles requests and produce responses back to the processor thread for writing.
+ *
+ * 处理broker中的新连接、请求和响应。
+ * Kafka支持两种类型的请求：
+ *  - data-plane：
+ *    - 处理来自客户端和集群中其他broker的请求。
+ *    - 线程模型：
+ *      1个Acceptor线程处理一个新连接。
+ *      可以在Kafka配置中为“listeners”配置多个“,”逗号分隔的，data-plane。
+ *      Acceptor has N Processor threads that each have their own selector and read requests from sockets
+ *      M Handler threads that handle requests and produce responses back to the processor threads for writing.
+ *      （类似tomcat？猜测;一个Acceptor线程相当于监听端口，不断获取socket，然后将每个socket分发给单独线程处理，整个过程用到nio）
+ *  - control-plane：
+ *    - 处理来自controller的请求。这是可选的，可以通过指定“ control.plane.listener.name”进行配置。
+ *      如果未配置，则控制器请求由data-plane处理。
+ *    - 线程模型:
+ *      1 Acceptor thread that handles new connections
+ *      Acceptor has 1 Processor thread that has its own selector and read requests from the socket.
+ *      1 Handler thread that handles requests and produce responses back to the processor thread for writing.
+ *      （看描述像是1条线程处理所有的这部分socket，处理完一个socket请求再处理下一个）
+ *
+ * config配置对象，metrics监控模块，
  */
 class SocketServer(val config: KafkaConfig,
                    val metrics: Metrics,
@@ -81,6 +102,7 @@ class SocketServer(val config: KafkaConfig,
                    val credentialProvider: CredentialProvider)
   extends Logging with KafkaMetricsGroup with BrokerReconfigurable {
 
+  //请求队列的最大长度（由queued.max.requests参数决定）
   private val maxQueuedRequests = config.queuedMaxRequests
 
   private val logContext = new LogContext(s"[SocketServer brokerId=${config.brokerId}] ")
