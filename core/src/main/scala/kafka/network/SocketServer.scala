@@ -165,6 +165,7 @@ class SocketServer(val config: KafkaConfig,
        */
       createDataPlaneAcceptorsAndProcessors(config.numNetworkThreads, config.dataPlaneListeners)
 
+      
       //kafka启动时此参数为false，所以此处不进行acceptors和processors的启动
       if (startProcessingRequests) {
         this.startProcessingRequests()
