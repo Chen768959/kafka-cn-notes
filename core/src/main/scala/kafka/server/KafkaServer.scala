@@ -437,7 +437,18 @@ class KafkaServer(val config: KafkaConfig, time: Time = Time.SYSTEM, threadNameP
         dynamicConfigManager = new DynamicConfigManager(zkClient, dynamicConfigHandlers)
         dynamicConfigManager.startup()
 
-        // socketserver开始处理请求
+        /**
+         * 有两种socket连接数据要处理：ControlPlane和DataPlanePlane。
+         * 处理这两种数据的是配置文件中的“监听器”
+         * 每个监听器都有对应的acceptor对象和processor对象（数量不定）。
+         * acceptor和processor对象都实现了runnable接口。
+         *
+         * 此处做的就是给每个acceptor对象和每个processor对象都创建新线程，然后执行他们的run方法。
+         *
+         * Q：
+         * 1、每个监听器对应的acceptor对象和processor对象分别是什么？
+         * 2、这些对象的run逻辑是什么？
+         */
         socketServer.startProcessingRequests(authorizerFutures)
 
         brokerState.newState(RunningAsBroker)

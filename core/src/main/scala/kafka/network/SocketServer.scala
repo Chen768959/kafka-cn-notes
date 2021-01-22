@@ -225,8 +225,15 @@ class SocketServer(val config: KafkaConfig,
   def startProcessingRequests(authorizerFutures: Map[Endpoint, CompletableFuture[Void]] = Map.empty): Unit = {
     info("Starting socket server acceptors and processors")
     this.synchronized {
+      // 之前创建accepter和processor时，该参数为false，表示当时不执行二者的启动
       if (!startedProcessingRequests) {
+        /**
+         * 给acceptor和其中的processor每个都使用一个新线程执行其中run方法
+         */
+
+        //启动ControlPlane数据的Processor和Acceptor
         startControlPlaneProcessorAndAcceptor(authorizerFutures)
+        // 启动DataPlanePlane数据的Processor和Acceptor
         startDataPlaneProcessorsAndAcceptors(authorizerFutures)
         startedProcessingRequests = true
       } else {
@@ -241,6 +248,9 @@ class SocketServer(val config: KafkaConfig,
    *
    * Before starting them, we ensure that authorizer has all the metadata to authorize
    * requests on that endpoint by waiting on the provided future.
+   *
+   * 先启动acceptor中的processor对象，每个对象给其新开线程执行run方法。
+   * 再新开线程执行Acceptor的run方法
    */
   private def startAcceptorAndProcessors(threadPrefix: String,
                                          endpoint: EndPoint,
@@ -249,13 +259,16 @@ class SocketServer(val config: KafkaConfig,
     debug(s"Wait for authorizer to complete start up on listener ${endpoint.listenerName}")
     waitForAuthorizerFuture(acceptor, authorizerFutures)
     debug(s"Start processors on listener ${endpoint.listenerName}")
+    // 启动acceptor中的processor，即为每一个process对象创建线程执行其中的run方法。
     acceptor.startProcessors(threadPrefix)
     debug(s"Start acceptor thread on listener ${endpoint.listenerName}")
     if (!acceptor.isStarted()) {
+      // 创建accepter线程，然后执行acceptor的run方法
       KafkaThread.nonDaemon(
         s"${threadPrefix}-kafka-socket-acceptor-${endpoint.listenerName}-${endpoint.securityProtocol}-${endpoint.port}",
         acceptor
       ).start()
+      //此处是等待acceptor的run方法开始执行，如果acceptor的run方法开始执行后，则当前线程继续往下执行
       acceptor.awaitStartup()
     }
     info(s"Started $threadPrefix acceptor and processor(s) for endpoint : ${endpoint.listenerName}")
@@ -283,8 +296,11 @@ class SocketServer(val config: KafkaConfig,
    * Start the processor of control-plane acceptor and the acceptor of this server.
    */
   private def startControlPlaneProcessorAndAcceptor(authorizerFutures: Map[Endpoint, CompletableFuture[Void]]): Unit = {
+    // 迭代所有controlPlane的Acceptor
     controlPlaneAcceptorOpt.foreach { controlPlaneAcceptor =>
+      // 获取监听器
       val endpoint = config.controlPlaneListener.get
+      //给每个acceptor对象启动单独线程执行run方法，给其中的每个processor对象也启动单独线程执行run方法
       startAcceptorAndProcessors(ControlPlaneThreadPrefix, endpoint, controlPlaneAcceptor, authorizerFutures)
     }
   }
@@ -527,6 +543,7 @@ private[kafka] abstract class AbstractServerThread(connectionQuotas: ConnectionQ
   // `shutdown()` is invoked before `startupComplete` and `shutdownComplete` if an exception is thrown in the constructor
   // (e.g. if the address is already in use). We want `shutdown` to proceed in such cases, so we first assign an open
   // latch and then replace it in `startupComplete()`.
+  //
   @volatile private var shutdownLatch = new CountDownLatch(0)
 
   private val alive = new AtomicBoolean(true)
@@ -822,7 +839,7 @@ private[kafka] class Processor(val id: Int,
 
   private val newConnections = new ArrayBlockingQueue[SocketChannel](connectionQueueSize)
   private val inflightResponses = mutable.Map[String, RequestChannel.Response]()
-  private val responseQueue = new LinkedBlockingDeque[RequestChannel.Response]()
+  private val responseQueue = new L inkedBlockingDeque[RequestChannel.Response]()
 
   private[kafka] val metricTags = mutable.LinkedHashMap(
     ListenerMetricTag -> listenerName.value,
