@@ -343,6 +343,15 @@ class KafkaServer(val config: KafkaConfig, time: Time = Time.SYSTEM, threadNameP
         // that credentials have been loaded before processing authentications.
         // 启动socketServer，监听端口
         socketServer = new SocketServer(config, metrics, time, credentialProvider)
+        /**
+         * 如果startProcessingRequests传参为true，则在此方法中就启动acceptors和processors
+         * 否则等到kafka启动方法的最后调用socketServer.startProcessingRequests(authorizerFutures)时再启动。
+         * kafka初始化时该参数为false
+         *
+         * 此方法为每个DataPlane监听和ControlPlane监听器创建了对应的Acceptor和Processor对象，
+         * {@link kafka.network.Acceptor}
+         * {@link kafka.network.Processor}
+         */
         socketServer.startup(startProcessingRequests = false)
 
         /* start replica manager */
@@ -444,10 +453,16 @@ class KafkaServer(val config: KafkaConfig, time: Time = Time.SYSTEM, threadNameP
          * acceptor和processor对象都实现了runnable接口。
          *
          * 此处做的就是给每个acceptor对象和每个processor对象都创建新线程，然后执行他们的run方法。
+         * {@link kafka.network.Acceptor}
+         * {@link kafka.network.Processor}
+         *
+         * 由于ControlPlane类型的数据只能配置1个监听器，
+         * 所以对应的处理ControlPlane类型数据的acceptor和processor也只有一个，也就只有1条线程在执行。
          *
          * Q：
-         * 1、每个监听器对应的acceptor对象和processor对象分别是什么？
-         * 2、这些对象的run逻辑是什么？
+         * 这些对象的run逻辑是什么？
+         * {@link kafka.network.Acceptor.run()}
+         * {@link kafka.network.Processor.run()}
          */
         socketServer.startProcessingRequests(authorizerFutures)
 

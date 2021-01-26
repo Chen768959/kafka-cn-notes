@@ -546,6 +546,7 @@ private[kafka] abstract class AbstractServerThread(connectionQuotas: ConnectionQ
   //
   @volatile private var shutdownLatch = new CountDownLatch(0)
 
+  //开关：为true时run方法循环执行
   private val alive = new AtomicBoolean(true)
 
   def wakeup(): Unit
@@ -616,6 +617,8 @@ private[kafka] class Acceptor(val endPoint: EndPoint,
                               metricPrefix: String) extends AbstractServerThread(connectionQuotas) with KafkaMetricsGroup {
 
   private val nioSelector = NSelector.open()
+
+  //根据监听器配置创建对应的ServerSocketChannel（非阻塞模型）
   val serverChannel = openServerSocket(endPoint.host, endPoint.port)
   private val processors = new ArrayBuffer[Processor]()
   private val processorsStarted = new AtomicBoolean
@@ -670,42 +673,73 @@ private[kafka] class Acceptor(val endPoint: EndPoint,
 
   /**
    * Accept loop that checks for new connection attempts
+   *
+   * 通过nio模型，
+   * 建立serverchannel监听配置中监听器的端口和地址，
+   * 注册进selector，且注册的事件为accept。
+   * 循环以下内容：
+   * selector查询serverchannel是否有accept事件，
+   * 存在该事件的话，则accept出socketChannel对象，
+   * 然后以轮训的方式尝试将此socketChannel放入某个processor的阻塞队列中以供处理。
    */
   def run(): Unit = {
+    //将serverchannel注册进selector中，且对应监听的事件为ACCEPT
     serverChannel.register(nioSelector, SelectionKey.OP_ACCEPT)
     startupComplete()
     try {
       var currentProcessorIndex = 0
+      //原子开关，初始为true
       while (isRunning) {
         try {
+          //查询多少channel准备就绪了
+          //select方法执行期间是阻塞的，一般会等到至少有一个channel准备完毕才返回，此处设置最大阻塞时间500毫秒
           val ready = nioSelector.select(500)
+
+          // 只有当存在准备就绪的channel时，才处理
           if (ready > 0) {
             val keys = nioSelector.selectedKeys()
             val iter = keys.iterator()
+
+            /**
+             * 迭代selector中注册的所有channel（实际上只有1个）
+             * 当出现accept标识时，则根据key找到对应channel。
+             */
             while (iter.hasNext && isRunning) {
               try {
                 val key = iter.next
                 iter.remove()
 
+                //acceptor的run方法中的channel只监听accept状态，如果有其他状态则会直接报错
                 if (key.isAcceptable) {
+                  // 此处根据key，从serverChannel中accept一个socketChannel
                   accept(key).foreach { socketChannel =>
                     // Assign the channel to the next processor (using round-robin) to which the
                     // channel can be added without blocking. If newConnections queue is full on
                     // all processors, block until the last one is able to accept a connection.
+                    /**
+                     * 一次socket请求是由某一个processor来处理的。
+                     * 而一个acceptor中可能有很多个processor，
+                     * 以下会尝试用每一个processor都处理一遍改socket，
+                     * 所以此处记载的重复次数就是processor数组的长度
+                     */
                     var retriesLeft = synchronized(processors.length)
                     var processor: Processor = null
                     do {
+                      // 重试次数减一
                       retriesLeft -= 1
                       processor = synchronized {
                         // adjust the index (if necessary) and retrieve the processor atomically for
                         // correct behaviour in case the number of processors is reduced dynamically
+                        //通过轮训acceptor中的所有processor的方式，
+                        //每次轮训出一个processor用于处理该socketChannel连接。
                         currentProcessorIndex = currentProcessorIndex % processors.length
                         processors(currentProcessorIndex)
                       }
                       currentProcessorIndex += 1
+                      //true表示已成功放入待处理队列，则跳出循环
                     } while (!assignNewConnection(socketChannel, processor, retriesLeft == 0))
                   }
-                } else
+                } else//acceptor的run方法中的channel只监听accept状态，如果有其他状态则会直接报错
                   throw new IllegalStateException("Unrecognized key state for acceptor thread.")
               } catch {
                 case e: Throwable => error("Error while accepting connection", e)
@@ -731,6 +765,8 @@ private[kafka] class Acceptor(val endPoint: EndPoint,
 
   /**
   * Create a server socket to listen for connections on.
+   *
+   * 创建ServerSocketChannel监听配置中监听器的端口和地址
   */
   private def openServerSocket(host: String, port: Int): ServerSocketChannel = {
     val socketAddress =
@@ -738,12 +774,18 @@ private[kafka] class Acceptor(val endPoint: EndPoint,
         new InetSocketAddress(port)
       else
         new InetSocketAddress(host, port)
+
+    //开启channel监听端口
     val serverChannel = ServerSocketChannel.open()
+    //设置成非阻塞模式
     serverChannel.configureBlocking(false)
-    if (recvBufferSize != Selectable.USE_DEFAULT_BUFFER_SIZE)
+    if (recvBufferSize != Selectable.USE_DEFAULT_BUFFER_SIZE) {
+      //设置接收缓存大小
       serverChannel.socket().setReceiveBufferSize(recvBufferSize)
+    }
 
     try {
+      //绑定地址和端口（配置中的监听器的端口和地址）
       serverChannel.socket.bind(socketAddress)
       info(s"Awaiting socket connections on ${socketAddress.getHostString}:${serverChannel.socket.getLocalPort}.")
     } catch {
@@ -755,11 +797,16 @@ private[kafka] class Acceptor(val endPoint: EndPoint,
 
   /**
    * Accept a new connection
+   *
+   * 根据key找到对应的channel连接对象
    */
   private def accept(key: SelectionKey): Option[SocketChannel] = {
+    // 找到serverchannel
     val serverSocketChannel = key.channel().asInstanceOf[ServerSocketChannel]
+    // 获取一个socketchannel
     val socketChannel = serverSocketChannel.accept()
     try {
+      // 记录请求数
       connectionQuotas.inc(endPoint.listenerName, socketChannel.socket.getInetAddress, blockedPercentMeter)
       socketChannel.configureBlocking(false)
       socketChannel.socket().setTcpNoDelay(true)
@@ -775,7 +822,21 @@ private[kafka] class Acceptor(val endPoint: EndPoint,
     }
   }
 
+  /**
+   * 为true，则表示成功将socket放入processor中的阻塞队列待处理
+   * 为false，则表示继续下一次processor轮训尝试
+   * @param socketChannel
+   * @param processor
+   * @param mayBlock
+   * @return
+   */
   private def assignNewConnection(socketChannel: SocketChannel, processor: Processor, mayBlock: Boolean): Boolean = {
+    /**
+     * 尝试将socket放入此processor的阻塞队列中，
+     * 如果成功放入则返回true，
+     * 如果满了没放成功，且“所有的processor都轮训尝试过了”，则阻塞的等待放入，成功放入后返回true。
+     * 如果满了没放成功，且还有processor轮训没有尝试，则返回false
+     */
     if (processor.accept(socketChannel, mayBlock, blockedPercentMeter)) {
       debug(s"Accepted connection from ${socketChannel.socket.getRemoteSocketAddress} on" +
         s" ${socketChannel.socket.getLocalSocketAddress} and assigned it to processor ${processor.id}," +
@@ -1143,21 +1204,43 @@ private[kafka] class Processor(val id: Int,
 
   /**
    * Queue up a new connection for reading
+   *
+   * 尝试将socket放入此processor的阻塞队列中，
+   * 如果成功放入则返回true，
+   * 如果满了没放成功，且“所有的processor都轮训尝试过了”，则阻塞的等待放入，成功放入后返回true。
+   * 如果满了没放成功，且还有processor轮训没有尝试，则返回false
+   *
+   * @param socketChannel 待处理的客户端连接
+   * @param mayBlock 是否到达重试的上限（即是否全部processor都试过了，都不行），没有达到上限时此值为false
+   * @param acceptorIdlePercentMeter 压测相关对象
+   * @return 返回true，则表示不需要将此socket轮训给其他processor了，返回false，则表示将此socket轮训给其他processor
    */
   def accept(socketChannel: SocketChannel,
              mayBlock: Boolean,
              acceptorIdlePercentMeter: com.yammer.metrics.core.Meter): Boolean = {
     val accepted = {
-      if (newConnections.offer(socketChannel))
+      //将socketchannel插入阻塞队列，如果插入成功，则返回true，如果满了则返回false
+      if (newConnections.offer(socketChannel)) {
         true
-      else if (mayBlock) {
+        //是否到达轮训processor上限？
+      } else if (mayBlock) {
         val startNs = time.nanoseconds
+        //还是尝试将socketchannel插入阻塞队列，不过如果队列满了话一直等待，直到可插入为止
         newConnections.put(socketChannel)
+        //将耗时情况告知监控
         acceptorIdlePercentMeter.mark(time.nanoseconds() - startNs)
         true
+        // 到达此处就表示当前processor的阻塞队列满了，且还未轮训完，
+        //则返回false，让其继续轮训下一个processor
       } else
         false
     }
+
+    /**
+     * 为true则表示不需要再轮训了，
+     * 已正常存入processor的待处理队列中，
+     * 则此处尝试唤醒selector
+     */
     if (accepted)
       wakeup()
     accepted
