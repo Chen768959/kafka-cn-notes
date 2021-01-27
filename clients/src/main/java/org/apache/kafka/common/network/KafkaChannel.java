@@ -346,6 +346,12 @@ public class KafkaChannel implements AutoCloseable {
         return transportLayer.ready();
     }
 
+    /**
+     * transportLayer是对传输层的封装，
+     * 此处的ready指三次握手已就绪
+     *
+     * authenticator是sasl鉴权的封装
+     */
     public boolean ready() {
         return transportLayer.ready() && authenticator.complete();
     }
@@ -444,6 +450,7 @@ public class KafkaChannel implements AutoCloseable {
 
     private long receive(NetworkReceive receive) throws IOException {
         try {
+            //transportLayer是传输层的封装
             return receive.readFrom(transportLayer);
         } catch (SslAuthenticationException e) {
             // With TLSv1.3, post-handshake messages may throw SSLExceptions, which are

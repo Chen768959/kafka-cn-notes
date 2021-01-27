@@ -89,9 +89,15 @@ public class NetworkReceive implements Receive {
         return !size.hasRemaining() && buffer != null && !buffer.hasRemaining();
     }
 
+    // 返回读取了的字节数量
     public long readFrom(ScatteringByteChannel channel) throws IOException {
+        //记录一共读取了多少字节
         int read = 0;
+        /**
+         * 判断buffer中是否还有位置
+         */
         if (size.hasRemaining()) {
+            // 读取数据到size缓冲区
             int bytesRead = channel.read(size);
             if (bytesRead < 0)
                 throw new EOFException();

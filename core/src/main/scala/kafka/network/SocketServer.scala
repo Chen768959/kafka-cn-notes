@@ -900,7 +900,7 @@ private[kafka] class Processor(val id: Int,
 
   private val newConnections = new ArrayBlockingQueue[SocketChannel](connectionQueueSize)
   private val inflightResponses = mutable.Map[String, RequestChannel.Response]()
-  private val responseQueue = new L inkedBlockingDeque[RequestChannel.Response]()
+  private val responseQueue = new LinkedBlockingDeque[RequestChannel.Response]()
 
   private[kafka] val metricTags = mutable.LinkedHashMap(
     ListenerMetricTag -> listenerName.value,
@@ -958,12 +958,16 @@ private[kafka] class Processor(val id: Int,
   override def run(): Unit = {
     startupComplete()
     try {
+      // 初始为true
       while (isRunning) {
         try {
           // setup any new connections that have been queued up
+          // 循环poll待处理阻塞队列中的socketChannel（直到队列为空，或者读取个数达到队列总长度），
+          // 将这些channel其注册进selector，注册事件为read
           configureNewConnections()
           // register any new responses for writing
           processNewResponses()
+          // 选择器轮训事件，用来读取请求、发送响应，默认超时时间为300ms
           poll()
           processCompletedReceives()
           processCompletedSends()
@@ -1250,13 +1254,20 @@ private[kafka] class Processor(val id: Int,
    * Register any new connections that have been queued up. The number of connections processed
    * in each iteration is limited to ensure that traffic and connection close notifications of
    * existing channels are handled promptly.
+   *
+   * 循环poll待处理阻塞队列中的socketChannel（直到队列为空，或者读取个数达到队列总长度），
+   * 将这些channel其注册进selector
    */
   private def configureNewConnections(): Unit = {
     var connectionsProcessed = 0
+    //当处理数小于待办队列总长度，且待处理队列不为空时，进入以下逻辑
     while (connectionsProcessed < connectionQueueSize && !newConnections.isEmpty) {
-      val channel = newConnections.poll()
+      //从阻塞队列中读取一个socketChannel连接（acceptor放入的）
+      val channel = newConnections.poll()//poll不会阻塞等待，如果队列为空，则直接返回null
       try {
         debug(s"Processor $id listening to new connection from ${channel.socket.getRemoteSocketAddress}")
+        // 将socket注册进selector，且注册事件为read
+        // 给每个socketchannel key创建一个附加对象KafkaChannel
         selector.register(connectionId(channel.socket), channel)
         connectionsProcessed += 1
       } catch {
