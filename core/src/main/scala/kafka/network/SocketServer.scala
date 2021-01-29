@@ -976,18 +976,40 @@ private[kafka] class Processor(val id: Int,
            *
            * read就绪事件：
            * 尝试从channel中读取若干字节，
-           * 读取的数据会被包装成{@link NetworkReceive}，
-           * 之后{@link NetworkReceive}和channel一起作为键值对，放入Selector的map中
+           * 读取的数据会被包装成{@link org.apache.kafka.common.network.NetworkReceive}，
+           * 之后{@link org.apache.kafka.common.network.NetworkReceive}和channel一起作为键值对，放入Selector的map中
            *
            * write就绪事件：
            * 尝试往channel中写入数据
            * 判断是否写入完成，写入完成则返回{@link Send}对象
-           * 如果完成，则将{@link Send}对象加入到{@link Selector}的completedSends队列
+           * 如果完成，则将{@link Send}对象加入到{@link org.apache.kafka.common.network.Selector}的completedSends队列
+           *
+           * todo {@link org.apache.kafka.common.network.NetworkReceive}和{@link Send}的读取与写入逻辑是什么？
            */
           poll()
+
+          /**
+           * poll()方法中将每一个请求都读取成了一个NetworkReceive的形式
+           * 此方法先从ByteBuffer解析出RequestHeader，kafka的请求头
+           * todo RequestHeader请求头生成逻辑？
+           * 再创建构建{@link RequestChannel.Request}}对象，
+           * 将Request添加到RequestChannel中的阻塞队列中等待handler处理。
+           * todo RequestChannel队列如何生成，其是全局唯一，还是与监听器或Processor一一对应？
+           *
+           * 由此是否可推断：
+           * NetworkReceive与每次请求是一一对应的关系，
+           * todo 但是每次请求都要变成Request等待处理，NetworkReceive的意义是什么？
+           *
+           * 所以此方法是对请求的包装，将请求包装成内部对象，
+           * 最终存放于RequestChannel的阻塞队列中，
+           * 等待handler线程来执行具体的操作逻辑
+           */
           processCompletedReceives()
+          // 处理已经发出响应后的回调逻辑
           processCompletedSends()
+          // 处理已经断开的连接
           processDisconnected()
+          // 关闭超限连接
           closeExcessConnections()
         } catch {
           // We catch all the throwables here to prevent the processor thread from exiting. We do this because
@@ -1098,17 +1120,31 @@ private[kafka] class Processor(val id: Int,
     header
   }
 
+  /**
+   * poll()方法中将每一个请求都读取成了一个NetworkReceive的形式
+   * 此方法先从ByteBuffer解析出RequestHeader，kafka的请求头
+   * todo RequestHeader请求头生成逻辑？
+   * 再创建构建 Reques对象，
+   * 将Request添加到RequestChannel中的阻塞队列中等待handler处理。
+   * todo RequestChannel队列如何生成，其是全局唯一，还是与监听器或Processor一一对应？
+   */
   private def processCompletedReceives(): Unit = {
+    /**
+     * 上一个poll方法将channel与对应的NetworkReceive读取结果对象存入到这个completedReceives集合中。
+     * 所以此处迭代的是每一个收到的请求内容
+     */
     selector.completedReceives.forEach { receive =>
       try {
         openOrClosingChannel(receive.source) match {
           case Some(channel) =>
+            // 解析ByteBuffer 到RequestHeader
             val header = parseRequestHeader(receive.payload)
             if (header.apiKey == ApiKeys.SASL_HANDSHAKE && channel.maybeBeginServerReauthentication(receive,
               () => time.nanoseconds()))
               trace(s"Begin re-authentication: $channel")
             else {
               val nowNanos = time.nanoseconds()
+              // 如果认证会话已过期，则关闭连接
               if (channel.serverAuthenticationSessionExpired(nowNanos)) {
                 // be sure to decrease connection count and drop any in-flight responses
                 debug(s"Disconnecting expired channel: $channel : $header")
@@ -1116,9 +1152,10 @@ private[kafka] class Processor(val id: Int,
                 expiredConnectionsKilledCount.record(null, 1, 0)
               } else {
                 val connectionId = receive.source
-                val context = new RequestContext(header, connectionId, channel.socketAddress,
+                             val context = new RequestContext(header, connectionId, channel.socketAddress,
                   channel.principal, listenerName, securityProtocol,
                   channel.channelMetadataRegistry.clientInformation)
+                // 构建 Reques对象 todo 什么是Reques对象，其作用是什么
                 val req = new RequestChannel.Request(processor = id, context = context,
                   startTimeNanos = nowNanos, memoryPool, receive.payload, requestChannel.metrics)
                 // KIP-511: ApiVersionsRequest is intercepted here to catch the client software name
@@ -1131,7 +1168,9 @@ private[kafka] class Processor(val id: Int,
                       apiVersionsRequest.data.clientSoftwareVersion))
                   }
                 }
+                // 将Request添加到RequestChannel中的阻塞队列中等待handler处理，
                 requestChannel.sendRequest(req)
+                // 移除可读的事件
                 selector.mute(connectionId)
                 handleChannelMuteEvent(connectionId, ChannelMuteEvent.REQUEST_RECEIVED)
               }

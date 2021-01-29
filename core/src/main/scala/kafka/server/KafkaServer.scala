@@ -219,8 +219,8 @@ class KafkaServer(val config: KafkaConfig, time: Time = Time.SYSTEM, threadNameP
    * 实例化LogManager，SocketServer和KafkaRequestHandlers，
    *
    * ·始化zk的连接 {@link initZkClient}
-   * ·监听zk变化 {@link FinalizedFeatureChangeListener.initOrThrow} todo 未完
-   * ·获取cluster_id {@link getOrGenerateClusterId} todo 未完
+   * ·监听zk变化 {@link FinalizedFeatureChangeListener.initOrThrow}
+   * ·获取cluster_id {@link getOrGenerateClusterId}
    * ·加载metadata信息
    * ·初始化brokerId
    * ·启动一个线程池执行一些后台定时任务
