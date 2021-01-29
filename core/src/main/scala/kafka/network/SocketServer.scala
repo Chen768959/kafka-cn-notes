@@ -989,7 +989,7 @@ private[kafka] class Processor(val id: Int,
           poll()
 
           /**
-           * poll()方法中将每一个请求都读取成了一个NetworkReceive的形式
+           * poll()方法中将每一个read就绪的socketchannel都读取成了一个NetworkReceive的形式
            * 此方法先从ByteBuffer解析出RequestHeader，kafka的请求头
            * todo RequestHeader请求头生成逻辑？
            * 再创建构建{@link RequestChannel.Request}}对象，
@@ -1005,11 +1005,22 @@ private[kafka] class Processor(val id: Int,
            * 等待handler线程来执行具体的操作逻辑
            */
           processCompletedReceives()
-          // 处理已经发出响应后的回调逻辑
+
+          /**
+           * 看代码逻辑，此处没有针对Send做更多操作，
+           * 那么该往write就绪中写入数据的操作应该是在poll()中做的，
+           * poll中写入成功后会生成一个Send对象，
+           * 此处只是对Send对象进行些收尾
+           * todo 那么poll()往写就绪的socketchannel中写了什么？
+           */
           processCompletedSends()
-          // 处理已经断开的连接
+
+          /**
+           * poll()方法会将已经断开的连接放入disconnected集合中，
+           * 此方法做了些收尾，比如从某些集合总清除这些已断开的连接
+           */
           processDisconnected()
-          // 关闭超限连接
+          // 关闭超过连接限制数量的连接
           closeExcessConnections()
         } catch {
           // We catch all the throwables here to prevent the processor thread from exiting. We do this because
@@ -1190,6 +1201,7 @@ private[kafka] class Processor(val id: Int,
   }
 
   private def processCompletedSends(): Unit = {
+
     selector.completedSends.forEach { send =>
       try {
         val response = inflightResponses.remove(send.destination).getOrElse {
