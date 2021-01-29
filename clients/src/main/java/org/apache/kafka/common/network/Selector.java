@@ -436,13 +436,29 @@ public class Selector implements Selectable, AutoCloseable {
      * @throws IllegalStateException If a send is given for which we have no existing connection or for which there is
      *         already an in-progress send
      */
+    /**
+     * 每一次poll，都会检查selector中注册的socketchannel是否有准备就绪。
+     *
+     * 获取所有准备就绪的channel key，迭代其中的每一个对应channel。
+     * 根据channel准备就绪的事件进行对应操作：
+     *
+     * read就绪事件：
+     * 尝试从channel中读取若干字节，
+     * 读取的数据会被包装成{@link NetworkReceive}，
+     * 之后{@link NetworkReceive}和channel一起作为键值对，放入Selector的map中
+     *
+     * write就绪事件：
+     * 尝试往channel中写入数据
+     * 判断是否写入完成，写入完成则返回{@link Send}对象
+     * 如果完成，则将{@link Send}对象加入到{@link Selector}的completedSends队列
+     */
     @Override
     public void poll(long timeout) throws IOException {
         if (timeout < 0)
             throw new IllegalArgumentException("timeout should be >= 0");
 
         boolean madeReadProgressLastCall = madeReadProgressLastPoll;
-        //清除上一次轮询的所有结果
+        //清除上一次轮询的所有结果（此时selector中的变量都是上一次poll的结果，需要清空）
         clear();
 
         boolean dataInBuffers = !keysWithBufferedRead.isEmpty();
@@ -483,7 +499,20 @@ public class Selector implements Selectable, AutoCloseable {
             }
 
             // Poll from channels where the underlying socket has more data
-            // 处理此次准备就绪的socketchannel
+            /**
+             * 根据传入的key集合，迭代其中的每一个对应channel。
+             * 根据channel准备就绪的事件进行对应操作：
+             *
+             * read就绪事件：
+             * 尝试从channel中读取若干字节，
+             * 读取的数据会被包装成{@link NetworkReceive}，
+             * 之后{@link NetworkReceive}和channel一起作为键值对，放入Selector的map中
+             *
+             * write就绪事件：
+             * 尝试往channel中写入数据
+             * 判断是否写入完成，写入完成则返回{@link Send}对象
+             * 如果完成，则将{@link Send}对象加入到{@link Selector}的completedSends队列
+             */
             pollSelectionKeys(readyKeys, false, endSelect);
             // Clear all selected keys so that they are included in the ready count for the next select
             readyKeys.clear();
@@ -508,7 +537,19 @@ public class Selector implements Selectable, AutoCloseable {
     /**
      * handle any ready I/O on a set of selection keys
      *
-     * 处理一组准备就绪的channelSocket
+     * 根据传入的key集合，迭代其中的每一个对应channel。
+     * 根据channel准备就绪的事件进行对应操作：
+     *
+     * read就绪事件：
+     * 尝试从channel中读取若干字节，
+     * 读取的数据会被包装成{@link NetworkReceive}，
+     * 之后{@link NetworkReceive}和channel一起作为键值对，放入Selector的map中
+     *
+     * write就绪事件：
+     * 尝试往channel中写入数据
+     * 判断是否写入完成，写入完成则返回{@link Send}对象
+     * 如果完成，则将{@link Send}对象加入到{@link Selector}的completedSends队列
+     *
      * @param selectionKeys set of keys to handle
      * @param isImmediatelyConnected true if running over a set of keys for just-connected sockets
      * @param currentTimeNanos time at which set of keys was determined
@@ -517,6 +558,7 @@ public class Selector implements Selectable, AutoCloseable {
     void pollSelectionKeys(Set<SelectionKey> selectionKeys,
                            boolean isImmediatelyConnected,
                            long currentTimeNanos) {
+        // 根据socketchannel key迭代每一个socketchannel
         for (SelectionKey key : determineHandlingOrder(selectionKeys)) {
             //获取socketchannel key中的附加对象KafkaChannel
             KafkaChannel channel = channel(key);
@@ -592,6 +634,12 @@ public class Selector implements Selectable, AutoCloseable {
                 // 从kafkachannel中读取数据
                 if (channel.ready() && (key.isReadable() || channel.hasBytesBuffered()) && !hasCompletedReceive(channel)
                         && !explicitlyMutedChannels.contains(channel)) {
+
+                    /**
+                     * 尝试从channel中读取若干字节，
+                     * 读取的数据会被包装成NetworkReceive，
+                     * 之后NetworkReceive和channel一起作为键值对，放入Selector的map中
+                     */
                     attemptRead(channel);
                 }
 
@@ -609,6 +657,11 @@ public class Selector implements Selectable, AutoCloseable {
 
                 long nowNanos = channelStartTimeNanos != 0 ? channelStartTimeNanos : currentTimeNanos;
                 try {
+                    /**
+                     * 尝试往channel中写入数据
+                     * 判断是否写入完成，写入完成则返回Send对象
+                     * 如果完成，则将Send对象加入到Selector的completedSends队列
+                     */
                     attemptWrite(key, channel, nowNanos);
                 } catch (Exception e) {
                     sendFailed = true;
@@ -658,9 +711,17 @@ public class Selector implements Selectable, AutoCloseable {
     }
 
     // package-private for testing
+    /**
+     * 尝试往channel中写入数据
+     * 判断是否写入完成，写入完成则返回Send对象
+     * 如果完成，则将Send对象加入到Selector的completedSends队列
+     */
     void write(KafkaChannel channel) throws IOException {
         String nodeId = channel.id();
+        // 尝试往channel中写入数据
         long bytesSent = channel.write();
+
+        // 判断是否写入完成，写入完成则返回Send对象
         Send send = channel.maybeCompleteSend();
         // We may complete the send with bytesSent < 1 if `TransportLayer.hasPendingWrites` was true and `channel.write()`
         // caused the pending writes to be written to the socket channel buffer
@@ -669,6 +730,7 @@ public class Selector implements Selectable, AutoCloseable {
             if (bytesSent > 0)
                 this.sensors.recordBytesSent(nodeId, bytesSent, currentTimeMs);
             if (send != null) {
+                // 如果完成，则将Send对象加入到Selector的completedSends队列
                 this.completedSends.add(send);
                 this.sensors.recordCompletedSend(nodeId, send.size(), currentTimeMs);
             }
@@ -687,17 +749,25 @@ public class Selector implements Selectable, AutoCloseable {
         }
     }
 
+    /**
+     * 尝试从channel中读取若干字节，
+     * 读取的数据会被包装成NetworkReceive，
+     * 之后NetworkReceive和channel一起作为键值对，放入Selector的map中
+     */
     private void attemptRead(KafkaChannel channel) throws IOException {
         String nodeId = channel.id();
 
+        // 尝试读取若干字节
         long bytesReceived = channel.read();
         if (bytesReceived != 0) {
             long currentTimeMs = time.milliseconds();
             sensors.recordBytesReceived(nodeId, bytesReceived, currentTimeMs);
             madeReadProgressLastPoll = true;
 
+            // 判断是否NetworkReceive读取完成
             NetworkReceive receive = channel.maybeCompleteReceive();
             if (receive != null) {
+                // 如果完成，则加入到completedReceives队列
                 addToCompletedReceives(channel, receive, currentTimeMs);
             }
         }

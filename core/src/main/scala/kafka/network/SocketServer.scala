@@ -967,7 +967,23 @@ private[kafka] class Processor(val id: Int,
           configureNewConnections()
           // register any new responses for writing
           processNewResponses()
-          // 选择器轮训事件，用来读取请求、发送响应，默认超时时间为300ms
+
+          /**
+           * 每一次poll，都会检查selector中注册的socketchannel是否有准备就绪。
+           *
+           * 获取所有准备就绪的channel key，迭代其中的每一个对应channel。
+           * 根据channel准备就绪的事件进行对应操作：
+           *
+           * read就绪事件：
+           * 尝试从channel中读取若干字节，
+           * 读取的数据会被包装成{@link NetworkReceive}，
+           * 之后{@link NetworkReceive}和channel一起作为键值对，放入Selector的map中
+           *
+           * write就绪事件：
+           * 尝试往channel中写入数据
+           * 判断是否写入完成，写入完成则返回{@link Send}对象
+           * 如果完成，则将{@link Send}对象加入到{@link Selector}的completedSends队列
+           */
           poll()
           processCompletedReceives()
           processCompletedSends()
