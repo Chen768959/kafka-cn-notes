@@ -31,11 +31,11 @@ import kafka.coordinator.group.GroupCoordinator
 import kafka.coordinator.transaction.TransactionCoordinator
 import kafka.log.{LogConfig, LogManager}
 import kafka.metrics.{KafkaMetricsGroup, KafkaMetricsReporter, KafkaYammerMetrics}
-import kafka.network.SocketServer
+import kafka.network.{RequestChannel, SocketServer}
 import kafka.security.CredentialProvider
 import kafka.utils._
 import kafka.zk.{BrokerInfo, KafkaZkClient}
-import org.apache.kafka.clients.{ApiVersions, ClientDnsLookup, ManualMetadataUpdater, NetworkClient, NetworkClientUtils, CommonClientConfigs}
+import org.apache.kafka.clients.{ApiVersions, ClientDnsLookup, CommonClientConfigs, ManualMetadataUpdater, NetworkClient, NetworkClientUtils}
 import org.apache.kafka.common.internals.ClusterResourceListeners
 import org.apache.kafka.common.message.ControlledShutdownRequestData
 import org.apache.kafka.common.metrics.{JmxReporter, Metrics, MetricsReporter, _}
@@ -417,6 +417,22 @@ class KafkaServer(val config: KafkaConfig, time: Time = Time.SYSTEM, threadNameP
           kafkaController, zkClient, config.brokerId, config, metadataCache, metrics, authorizer, quotaManagers,
           fetchManager, brokerTopicStats, clusterId, time, tokenManager, brokerFeatures, featureCache)
 
+        /**
+         * KafkaRequestHandlerPool类用于启动所有的handler线程。
+         * handler线程用于处理每次客户端请求的逻辑。
+         * （processor会将所有的请求封装成{@link RequestChannel.Request}对象，放入阻塞队列等待所有的handler消费处理）
+         *
+         * 创建多少条handler线程由配置文件中num.io.threads参数配置。
+         *
+         * 此处KafkaRequestHandlerPool对象的构造方法中会依据配置数量创建指定数目的{@link KafkaRequestHandler}对象线程，
+         * 并调用其run方法（{@link KafkaRequestHandler.run()}）
+         * run方法实际调用的是{@link kafka.server.KafkaApis.handle()}方法，
+         *
+         * 而这个KafkaApis就是此处初始化时传的dataPlaneRequestProcessor对象。
+         *
+         * 也就是说此处创建的每一个线程消费到请求对象后，执行的都是同一个dataPlaneRequestProcessor对象的handle方法
+         * {@link kafka.server.KafkaApis.handle()}方法
+         */
         dataPlaneRequestHandlerPool = new KafkaRequestHandlerPool(config.brokerId, socketServer.dataPlaneRequestChannel, dataPlaneRequestProcessor, time,
           config.numIoThreads, s"${SocketServer.DataPlaneMetricPrefix}RequestHandlerAvgIdlePercent", SocketServer.DataPlaneThreadPrefix)
 
@@ -425,6 +441,11 @@ class KafkaServer(val config: KafkaConfig, time: Time = Time.SYSTEM, threadNameP
             kafkaController, zkClient, config.brokerId, config, metadataCache, metrics, authorizer, quotaManagers,
             fetchManager, brokerTopicStats, clusterId, time, tokenManager, brokerFeatures, featureCache)
 
+          /**
+           * 步骤与上面创建KafkaRequestHandlerPool对象一致，
+           * 都是根据配置参数，创建对应条数的线程，
+           * 此处创建的每个线程都执行同一个对象（controlPlaneRequestProcessor）的handle方法
+           */
           controlPlaneRequestHandlerPool = new KafkaRequestHandlerPool(config.brokerId, socketServer.controlPlaneRequestChannelOpt.get, controlPlaneRequestProcessor, time,
             1, s"${SocketServer.ControlPlaneMetricPrefix}RequestHandlerAvgIdlePercent", SocketServer.ControlPlaneThreadPrefix)
         }

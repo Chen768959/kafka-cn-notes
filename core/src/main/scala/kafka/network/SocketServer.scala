@@ -992,7 +992,7 @@ private[kafka] class Processor(val id: Int,
            * poll()方法中将每一个read就绪的socketchannel都读取成了一个NetworkReceive的形式
            * 此方法先从ByteBuffer解析出RequestHeader，kafka的请求头
            * todo RequestHeader请求头生成逻辑？
-           * 再创建构建{@link RequestChannel.Request}}对象，
+           * 再创建构建{@link RequestChannel.Request}对象，
            * 将Request添加到RequestChannel中的阻塞队列中等待handler处理。
            * todo RequestChannel队列如何生成，其是全局唯一，还是与监听器或Processor一一对应？
            *
@@ -1001,7 +1001,7 @@ private[kafka] class Processor(val id: Int,
            * todo 但是每次请求都要变成Request等待处理，NetworkReceive的意义是什么？
            *
            * 所以此方法是对请求的包装，将请求包装成内部对象，
-           * 最终存放于RequestChannel的阻塞队列中，
+           * 最终存放于{@link RequestChannel}的requestQueue阻塞队列中，
            * 等待handler线程来执行具体的操作逻辑
            */
           processCompletedReceives()

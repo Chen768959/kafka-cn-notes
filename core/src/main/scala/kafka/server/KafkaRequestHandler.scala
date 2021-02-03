@@ -56,8 +56,14 @@ class KafkaRequestHandler(id: Int,
       // time should be discounted by # threads.
       val startSelectTime = time.nanoseconds
 
+      //processor将所有请求封装成了Request对象放在队列中，此处获取1个，并设置超时时间为300毫秒，没获取到的话300毫秒就返回null
       val req = requestChannel.receiveRequest(300)
       val endTime = time.nanoseconds
+      /**
+       * 此处统计的是当前handler线程获取队列对象的时间。
+       * 最长300毫秒。
+       * 由此统计出线程空闲时间，也就是多长时间没有获取到阻塞队列中的请求对象
+       */
       val idleTime = endTime - startSelectTime
       aggregateIdleMeter.mark(idleTime / totalHandlerThreads.get)
 
@@ -71,11 +77,17 @@ class KafkaRequestHandler(id: Int,
           try {
             request.requestDequeueTimeNanos = endTime
             trace(s"Kafka request handler $id on broker $brokerId handling request $request")
+
+            /**
+             * 实际调用的是{@link kafka.server.KafkaApis.handle()}方法
+             */
             apis.handle(request)
           } catch {
+            //出现严重错误则关闭线程
             case e: FatalExitError =>
               shutdownComplete.countDown()
               Exit.exit(e.statusCode)
+            //其他异常则只打日志
             case e: Throwable => error("Exception when handling request", e)
           } finally {
             request.releaseBuffer()
@@ -111,6 +123,8 @@ class KafkaRequestHandlerPool(val brokerId: Int,
 
   this.logIdent = "[" + logAndThreadNamePrefix + " Kafka Request Handler on Broker " + brokerId + "], "
   val runnables = new mutable.ArrayBuffer[KafkaRequestHandler](numThreads)
+
+  //循环创建多个handler线程，创建数为numThreads
   for (i <- 0 until numThreads) {
     createHandler(i)
   }
