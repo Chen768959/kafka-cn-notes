@@ -309,6 +309,7 @@ class SocketServer(val config: KafkaConfig,
 
   private def createDataPlaneAcceptorsAndProcessors(dataProcessorsPerListener: Int,
                                                     endpoints: Seq[EndPoint]): Unit = {
+    //迭代每一个监听器，由此可见每一个监听器都会创建对应的一个acceptor对象，和多个processor对象
     endpoints.foreach { endpoint =>
       // 将监听器纳入连接计数对象的监管
       connectionQuotas.addListener(config, endpoint.listenerName)

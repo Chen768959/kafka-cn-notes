@@ -134,15 +134,58 @@ class KafkaApis(val requestChannel: RequestChannel,
       trace(s"Handling request:${request.requestDesc(true)} from connection ${request.context.connectionId};" +
         s"securityProtocol:${request.context.securityProtocol},principal:${request.context.principal}")
       request.header.apiKey match {
+        /**
+         * 生产者发送消息至kafka
+         */
         case ApiKeys.PRODUCE => handleProduceRequest(request)
+
+        /**
+         * 处理fetch请求，
+         * consumer 和 follower都会发送fetch请求，
+         * follower副本 fetch集群中leader的最新消息，
+         * consumer fetch指定topic的消息
+         */
         case ApiKeys.FETCH => handleFetchRequest(request)
+
+        /**
+         * 获取某个topic的偏移量
+         */
         case ApiKeys.LIST_OFFSETS => handleListOffsetRequest(request)
+
+        /**
+         * 获取MetadataCache中关于topic的元数据信息，
+         * 生产者、消费者、普通调用者都可发此种请求
+         */
         case ApiKeys.METADATA => handleTopicMetadataRequest(request)
+
+        /**
+         * 当发现leader发生改变时，通知broker
+         */
         case ApiKeys.LEADER_AND_ISR => handleLeaderAndIsrRequest(request)
+
+        /**
+         * 由controller发送，停止某个broker对某个topic的partition的拉取
+         */
         case ApiKeys.STOP_REPLICA => handleStopReplicaRequest(request)
+
+        /**
+         * controller发现topic的元数据信息发生变化时，通知响应的broker
+         */
         case ApiKeys.UPDATE_METADATA => handleUpdateMetadataRequest(request)
+
+        /**
+         * broker关机时像controller发送关机指令
+         */
         case ApiKeys.CONTROLLED_SHUTDOWN => handleControlledShutdownRequest(request)
+
+        /**
+         * offset指的是消费者的消费进度，此处收到的是消费者发送其offset
+         */
         case ApiKeys.OFFSET_COMMIT => handleOffsetCommitRequest(request)
+
+        /**
+         * 消费者获取其发送的offset
+         */
         case ApiKeys.OFFSET_FETCH => handleOffsetFetchRequest(request)
         case ApiKeys.FIND_COORDINATOR => handleFindCoordinatorRequest(request)
         case ApiKeys.JOIN_GROUP => handleJoinGroupRequest(request)
@@ -508,6 +551,12 @@ class KafkaApis(val requestChannel: RequestChannel,
     val produceRequest = request.body[ProduceRequest]
     val numBytesAppended = request.header.toStruct.sizeOf + request.sizeOfBodyInBytes
 
+    /**
+     * 判断请求中是否含有事务
+     *
+     * 生产者发送的多条消息可以封装在一个事务中，要么这些消息都发送成功，要么都失败。
+     * 此处如果存在事务的话，要确保存在事务id
+     */
     if (produceRequest.hasTransactionalRecords) {
       val isAuthorizedTransactional = produceRequest.transactionalId != null &&
         authorize(request.context, WRITE, TRANSACTIONAL_ID, produceRequest.transactionalId)
@@ -523,12 +572,16 @@ class KafkaApis(val requestChannel: RequestChannel,
     }
 
     val produceRecords = produceRequest.partitionRecordsOrFail.asScala
+    //未授权topic的response
     val unauthorizedTopicResponses = mutable.Map[TopicPartition, PartitionResponse]()
+    //不存在topic的response
     val nonExistingTopicResponses = mutable.Map[TopicPartition, PartitionResponse]()
+    //无效请求的response
     val invalidRequestResponses = mutable.Map[TopicPartition, PartitionResponse]()
     val authorizedRequestInfo = mutable.Map[TopicPartition, MemoryRecords]()
     val authorizedTopics = filterByAuthorized(request.context, WRITE, TOPIC, produceRecords)(_._1.topic)
 
+    //迭代produceRequest的partitionRecords
     for ((topicPartition, memoryRecords) <- produceRecords) {
       if (!authorizedTopics.contains(topicPartition.topic))
         unauthorizedTopicResponses += topicPartition -> new PartitionResponse(Errors.TOPIC_AUTHORIZATION_FAILED)

@@ -374,7 +374,9 @@ class KafkaServer(val config: KafkaConfig, time: Time = Time.SYSTEM, threadNameP
         tokenManager.startup()
 
         /* start kafka controller */
-        // 启动kafka控制器，kafkaController为集群中的所有主题分区选取领导者副本；另一方面，它还承载着集群的全部元数据信息，并负责讲这些元数据信息同步到其他broker上。
+        /**
+         * 启动kafka控制器，kafkaController为集群中的所有主题分区选取领导者副本；另一方面，它还承载着集群的全部元数据信息，并负责讲这些元数据信息同步到其他broker上。
+         */
         kafkaController = new KafkaController(config, zkClient, time, metrics, brokerInfo, brokerEpoch, tokenManager, brokerFeatures, featureCache, threadNamePrefix)
         kafkaController.startup()
 
