@@ -121,12 +121,17 @@ class ControllerEventManager(controllerId: Int,
       val dequeued = pollFromEventQueue()
       dequeued.event match {
         case ShutdownEventThread => // The shutting down of the thread has been initiated at this point. Ignore this event.
+        //从controller事件队列中拉取事件，操作
         case controllerEvent =>
           _state = controllerEvent.state
 
           eventQueueTimeHist.update(time.milliseconds() - dequeued.enqueueTimeMs)
 
           try {
+            /**
+             * 此处的processor为{@link KafkaController}对象。
+             * 此方法实际上是event事件传给processor对象的process方法。
+             */
             def process(): Unit = dequeued.process(processor)
 
             rateAndTimeMetrics.get(state) match {
