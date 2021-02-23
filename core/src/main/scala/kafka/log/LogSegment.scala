@@ -43,6 +43,9 @@ import scala.math._
  *
  * A segment with a base offset of [base_offset] would be stored in two files, a [base_offset].index and a [base_offset].log file.
  *
+ * 一个分区在逻辑上是一个文件，但是实际上由很多文件组成，每一个文件可以看成是逻辑日志文件的一个分片文件，
+ * 一个分片文件以及其索引文件对应的就是一个LogSegment
+ *
  * @param log The file records containing log entries
  * @param lazyOffsetIndex The offset index
  * @param lazyTimeIndex The timestamp index
@@ -53,12 +56,12 @@ import scala.math._
  * @param time The time instance
  */
 @nonthreadsafe
-class LogSegment private[log] (val log: FileRecords,
-                               val lazyOffsetIndex: LazyIndex[OffsetIndex],
-                               val lazyTimeIndex: LazyIndex[TimeIndex],
+class LogSegment private[log] (val log: FileRecords, //分区的某一个日志分片文件
+                               val lazyOffsetIndex: LazyIndex[OffsetIndex], // 分片文件对应的索引文件
+                               val lazyTimeIndex: LazyIndex[TimeIndex], // 分片文件对应的时间索引文件
                                val txnIndex: TransactionIndex,
-                               val baseOffset: Long,
-                               val indexIntervalBytes: Int,
+                               val baseOffset: Long, // 日志文件中第一个信息的偏移量值
+                               val indexIntervalBytes: Int, // 间隔多少字节创建一个索引，对应 index.interval.bytes 配置
                                val rollJitterMs: Long,
                                val time: Time) extends Logging {
 
@@ -91,9 +94,11 @@ class LogSegment private[log] (val log: FileRecords,
     else throw new NoSuchFileException(s"Offset index file ${lazyOffsetIndex.file.getAbsolutePath} does not exist")
   }
 
+  // 当前logsegmnet文件的创建时间
   private var created = time.milliseconds
 
   /* the number of bytes since we last added an entry in the offset index */
+  // 自从上次添加索引后，log文件中又增加了多少字节数
   private var bytesSinceLastIndexEntry = 0
 
   // The timestamp we used for time based log rolling and for ensuring max compaction delay

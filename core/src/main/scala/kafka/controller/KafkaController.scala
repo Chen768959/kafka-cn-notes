@@ -288,6 +288,7 @@ class KafkaController(val config: KafkaConfig,
     zkClient.deleteLogDirEventNotifications(controllerContext.epochZkVersion)
     info("Deleting isr change notifications")
     zkClient.deleteIsrChangeNotifications(controllerContext.epochZkVersion)
+    // 初始化controller上下文，设置当前所有broker、topic、patition的leader、ISR等
     info("Initializing controller context")
     initializeControllerContext()
     info("Fetching topic deletions in progress")
