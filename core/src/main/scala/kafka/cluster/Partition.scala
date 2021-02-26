@@ -272,6 +272,7 @@ class Partition(val topicPartition: TopicPartition,
   private val stateChangeLogger = new StateChangeLogger(localBrokerId, inControllerContext = false, None)
   private val remoteReplicasMap = new Pool[Int, Replica]
   // The read lock is only required when multiple reads are executed and needs to be in a consistent manner
+  // ReentrantReadWriteLock：多线程读时不加锁，但某线程写时，禁止其他线程读和写
   private val leaderIsrUpdateLock = new ReentrantReadWriteLock
 
   // lock to prevent the follower replica log update while checking if the log dir could be replaced with future log.
@@ -1063,8 +1064,17 @@ class Partition(val topicPartition: TopicPartition,
   }
 
   def appendRecordsToLeader(records: MemoryRecords, origin: AppendOrigin, requiredAcks: Int): LogAppendInfo = {
+    /**
+     * inReadLock方法是个科里化方法，
+     * * 连续传两个参数，第一个为对象锁，inReadLock方法会调用锁对象的读锁，然后锁住以下函数体
+     *
+     * leaderIsrUpdateLock是分区内的锁，所以锁竞争也是针对分区而言的。
+     * leaderIsrUpdateLock是一个“可重入读写锁”，即允许并发读，但是写时阻塞其他线程的读和写。
+     * 此处的inReadLock表示尝试获取读锁（如果同时没有其他线程在持有写锁的情况下，则不会发生阻塞）
+     */
     val (info, leaderHWIncremented) = inReadLock(leaderIsrUpdateLock) {
       leaderLogIfLocal match {
+          //只有leader副本支持追加操作
         case Some(leaderLog) =>
           val minIsr = leaderLog.config.minInSyncReplicas
           val inSyncSize = isrState.isr.size
@@ -1075,10 +1085,16 @@ class Partition(val topicPartition: TopicPartition,
               s"is insufficient to satisfy the min.isr requirement of $minIsr for partition $topicPartition")
           }
 
+          /**
+           * 往leader副本中追加消息
+           *
+           * 至此，一个请求对象在handle线程内经过流转，最终交给了对应的主副本的日志对象来处理
+           */
           val info = leaderLog.appendAsLeader(records, leaderEpoch = this.leaderEpoch, origin,
             interBrokerProtocolVersion)
 
           // we may need to increment high watermark since ISR could be down to 1
+          // 后移high watermark值
           (info, maybeIncrementLeaderHW(leaderLog))
 
         case None =>

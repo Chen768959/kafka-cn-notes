@@ -445,7 +445,7 @@ class KafkaServer(val config: KafkaConfig, time: Time = Time.SYSTEM, threadNameP
 
           /**
            * 步骤与上面创建KafkaRequestHandlerPool对象一致，
-           * 都是根据配置参数，创建对应条数的线程，
+           * 只不过创建线程数只有1条
            * 此处创建的每个线程都执行同一个对象（controlPlaneRequestProcessor）的handle方法
            */
           controlPlaneRequestHandlerPool = new KafkaRequestHandlerPool(config.brokerId, socketServer.controlPlaneRequestChannelOpt.get, controlPlaneRequestProcessor, time,
