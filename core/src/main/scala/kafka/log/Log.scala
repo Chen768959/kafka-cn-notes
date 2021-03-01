@@ -286,7 +286,9 @@ class Log(@volatile private var _dir: File, // 当前逻辑日志所在的文件
    *
    * WH值——水位值
    * 简单来说：当前副本的下一条“待备份消息”的位移值。
-   * 可以说该水位位移值之前的消息都已经备份过了
+   * 可以说该水位位移值之前的消息都已经备份过了.
+   *
+   * kafka中只有HW偏移位之前的值是可以被消费的
    */
   @volatile private var highWatermarkMetadata: LogOffsetMetadata = LogOffsetMetadata(logStartOffset)
 
@@ -302,6 +304,26 @@ class Log(@volatile private var _dir: File, // 当前逻辑日志所在的文件
     // create the log directory if it doesn't exist
     Files.createDirectories(dir.toPath)
 
+    /**
+     * 初始化leaderEpochCache
+     *
+     * leaderEpoch：是一个“键值对”，
+     * 键值名是leader副本的版本号，从0开始，每次leader变更，则+1。
+     * 键值是offset，是对应版本的leader，写入的第一条数据的偏移位。
+     * 如：
+     * 第一个leader的leaderEpoch就是(0,0)，
+     * 第二个leader的leaderEpoch可能就是(1,105)
+     *
+     * 由此可看出leaderEpoch值只需要在leader一开始设置
+     *
+     * leaderEpochCache中会保存所有版本的leaderEpoch信息，
+     * 并定期将其写入一个checkpoint文件。
+     *
+     * 每个leader写数据时都会进行判断，判断是否是该leader第一次写数据，
+     * 如果是第一次写数据，则更新leaderEpochCache，将当前leader的leaderEpoch也加入缓存中。
+     *
+     * 每次有新的副本成为leader时，都会查询
+     */
     initializeLeaderEpochCache()
 
     /**
@@ -739,6 +761,9 @@ class Log(@volatile private var _dir: File, // 当前逻辑日志所在的文件
   private def loadSegments(): Long = {
     // first do a pass through the files in the log directory and remove any temporary files
     // and find any interrupted swap operations
+    /**
+     * 清除上次启动失败的遗留临时文件
+     */
     val swapFiles = removeTempFilesAndCollectSwapFiles()
 
     // Now do a second pass and load all the log and index files.
@@ -748,6 +773,11 @@ class Log(@volatile private var _dir: File, // 当前逻辑日志所在的文件
       // In case we encounter a segment with offset overflow, the retry logic will split it after which we need to retry
       // loading of segments. In that case, we also need to close all segments that could have been left open in previous
       // call to loadSegmentFiles().
+      /**
+       * 清空segment map，
+       * 重新加载dir路径（初始化Log对象时作为参数传入）下所有segment文件，并重建segment map集合
+       * 并删除无对应segment文件的孤立索引
+       */
       logSegments.foreach(_.close())
       segments.clear()
       loadSegmentFiles()
@@ -756,10 +786,33 @@ class Log(@volatile private var _dir: File, // 当前逻辑日志所在的文件
     // Finally, complete any interrupted swap operations. To be crash-safe,
     // log files that are replaced by the swap segment should be renamed to .deleted
     // before the swap file is restored as the new segment file.
+    /**
+     * 处理.swap后缀集合文件。
+     *
+     * swap文件是Log Compaction操作中产生的，是一个中间临时文件，
+     * Log Compaction俗称“日志压缩”，不过叫“日志压紧”更合适些，
+     * 是一种清除kafka过时数据的机制，
+     * 正常来说往kafka中写入已有key的新value，只是会追加，老value还是会保留，
+     * 开启Log Compaction后会清除这些老value。
+     *
+     * 日志压缩步骤：
+     * 先将所有需要保留的数据都放入.clean后缀的临时文件，
+     * 然后对这个.clean文件进行“日志压缩”操作，完毕后再将.clean后缀改为“.swap”后缀（这个.swap就是我们压缩完毕的新文件）
+     * 然后删除原本的日志文件，将.swap后缀去掉，诞生新的压缩后的日志文件。
+     * （索引文件的压缩也是同理）
+     *
+     * 所以如果启动时发现日志目录下存在.swap的文件，
+     * 就表示在日志压缩时，发生了宕机，日志完成了压缩，但是还没来得及切换后缀。
+     *
+     * 此处就是尝试恢复这些swap文件。
+     */
     completeSwapOperations(swapFiles)
 
     if (!dir.getAbsolutePath.endsWith(Log.DeleteDirSuffix)) {
       val nextOffset = retryOnOffsetOverflow {
+        /**
+         * 返回接下来的待插入偏移位
+         */
         recoverLog()
       }
 
