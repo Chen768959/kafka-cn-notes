@@ -233,8 +233,8 @@ case object SegmentDeletion extends LogStartOffsetIncrementReason {
  * @param producerIdExpirationCheckIntervalMs How often to check for producer ids which need to be expired
  */
 @threadsafe
-class Log(@volatile private var _dir: File,
-          @volatile var config: LogConfig,
+class Log(@volatile private var _dir: File, // 当前逻辑日志所在的文件夹路径，也是该topic副本的日志存储路径
+          @volatile var config: LogConfig, //
           @volatile var logStartOffset: Long,
           @volatile var recoveryPoint: Long,
           scheduler: Scheduler,
@@ -263,6 +263,7 @@ class Log(@volatile private var _dir: File,
   /* last time it was flushed */
   private val lastFlushedTime = new AtomicLong(time.milliseconds)
 
+  // 当前副本log的下一条待插入消息的位移值，该值等同于LEO（log end offset）
   @volatile private var nextOffsetMetadata: LogOffsetMetadata = _
 
   /* The earliest offset which is part of an incomplete transaction. This is used to compute the
@@ -282,24 +283,36 @@ class Log(@volatile private var _dir: File,
    * not eligible for deletion. This means that the active segment is only eligible for deletion if the high watermark
    * equals the log end offset (which may never happen for a partition under consistent load). This is needed to
    * prevent the log start offset (which is exposed in fetch responses) from getting ahead of the high watermark.
+   *
+   * WH值——水位值
+   * 简单来说：当前副本的下一条“待备份消息”的位移值。
+   * 可以说该水位位移值之前的消息都已经备份过了
    */
   @volatile private var highWatermarkMetadata: LogOffsetMetadata = LogOffsetMetadata(logStartOffset)
 
   /* the actual segments of the log */
+  // 保存了该副本虚拟日志的所有segment分片日志，key是分片日志文件的起始偏移量，value是分片日志对象
   private val segments: ConcurrentNavigableMap[java.lang.Long, LogSegment] = new ConcurrentSkipListMap[java.lang.Long, LogSegment]
 
   // Visible for testing
   @volatile var leaderEpochCache: Option[LeaderEpochFileCache] = None
 
+  // Log的初始化逻辑
   locally {
     // create the log directory if it doesn't exist
     Files.createDirectories(dir.toPath)
 
     initializeLeaderEpochCache()
 
+    /**
+     * 加载所有分片日志，
+     * 这样就能得出当前逻辑log的下一条待插入偏移位是多少，
+     * 返回这个待插入偏移位
+     */
     val nextOffset = loadSegments()
 
     /* Calculate the offset of the next message */
+    // 根据上一步获得的待插入偏移位值，设置LEO
     nextOffsetMetadata = LogOffsetMetadata(nextOffset, activeSegment.baseOffset, activeSegment.size)
 
     leaderEpochCache.foreach(_.truncateFromEnd(nextOffsetMetadata.messageOffset))
@@ -1091,6 +1104,7 @@ class Log(@volatile private var _dir: File,
                      leaderEpoch: Int,
                      ignoreRecordSize: Boolean): LogAppendInfo = {
     maybeHandleIOException(s"Error while appending records to $topicPartition in dir ${dir.getParent}") {
+      // 校验消息长度和验证码，得到消息对象直接返回
       val appendInfo = analyzeAndValidateRecords(records, origin, ignoreRecordSize)
 
       // return if we have no valid messages or if this is a duplicate of the last appended entry
@@ -1101,10 +1115,16 @@ class Log(@volatile private var _dir: File,
       var validRecords = trimInvalidBytes(records, appendInfo)
 
       // they are valid, insert them in the log
+      //至此，消息 有效，将其插入log文件中
       lock synchronized {
         checkIfMemoryMappedBufferClosed()
+        //判断消息是否需要分配偏移量（默认需要）
         if (assignOffsets) {
           // assign offsets to the message set
+          /**
+           * 获取nextOffsetMetadata记录的messageOffset字段，从此值后开发分配offset。
+           * 为消息分配偏移量.
+           */
           val offset = new LongRef(nextOffsetMetadata.messageOffset)
           appendInfo.firstOffset = Some(offset.value)
           val now = time.milliseconds
